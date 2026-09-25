@@ -1,27 +1,21 @@
-# Synapse
+# synapse
 
-Synapse is a local, provenance-first agentic knowledge engineering platform. The project is being built in eight reviewable steps; the current implementation is **Step 1: system boundaries and health**.
+Synapse is a local, provenance-first knowledge engineering platform for building evidence-grounded answers from technical sources.
 
-## What exists now
+## stack
 
-- FastAPI health API
-- Next.js system health screen
-- PostgreSQL 17 with pgvector through Docker Compose
-- Ollama runtime and required-model checks
-- Local environment configuration and boundary tests
+- fastapi backend
+- postgresql with pgvector
+- ollama with a chat model and an embedding model
 
-No ingestion, retrieval, knowledge graph, or agent workflow has been implemented yet.
+## prerequisites
 
-Synapse exposes its Docker PostgreSQL instance on host port `55432` so it does not conflict with an existing Windows PostgreSQL service on port `5432`.
+- docker desktop
+- node.js 22+
+- uv
+- ollama
 
-## Prerequisites
-
-- Docker Desktop
-- Node.js 22+
-- `uv`
-- Ollama with `qwen3.5:9b` and `qwen3-embedding:0.6b`
-
-## Start locally
+## start
 
 ```powershell
 Copy-Item .env.example .env
@@ -39,9 +33,15 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Open `http://localhost:3000`. The API documentation is available at `http://localhost:8000/docs`.
+Open `http://localhost:3000`.
 
-## Verify
+## api
+
+- `GET /api/health`
+- `GET /api/knowledge/summary`
+- `GET /api/knowledge/chunks/{id}`
+
+## verify
 
 ```powershell
 Set-Location backend
