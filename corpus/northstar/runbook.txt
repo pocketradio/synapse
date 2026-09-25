@@ -1,0 +1,6 @@
+Northstar Commerce Operations Runbook
+
+Payment retries
+================
+The current operations procedure permits up to five payment attempts before escalation.
+This intentionally conflicts with the architecture document and service configuration, which specify three attempts.

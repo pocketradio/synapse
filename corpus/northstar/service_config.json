@@ -1,0 +1,12 @@
+{
+  "checkout": {
+    "cart_cache": "redis",
+    "payment_retry_queue": "PaymentRetryQueue"
+  },
+  "payment": {
+    "retry": {
+      "max_attempts": 3,
+      "backoff": "exponential"
+    }
+  }
+}
