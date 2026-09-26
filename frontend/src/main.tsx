@@ -6,7 +6,7 @@ type Status = "healthy" | "degraded" | "unhealthy" | "loading";
 type Health = { status: Status; services: { database: { status: Status; pgvector: string }; ollama: { chat_model: { name: string }; embedding_model: { name: string } } } };
 type Candidate = { candidate_id: string; kind: string; content: string; source_name: string; locator: Record<string, unknown>; score: number };
 type Retrieval = { strategy: string; engine_counts: Record<string, number>; candidates: Candidate[] };
-type QueryResult = { query_run_id: string; answer: string; plan: { tools: string[]; kind?: string }; events: { node: string; [key: string]: unknown }[]; candidates: Candidate[]; verification: { claim_text: string; status: string; evidence_ids: string[] }[]; route?: string; cache_level?: string; model_calls?: number; latency_ms?: number };
+type QueryResult = { query_run_id: string; answer: string; plan: { tools: string[]; kind?: string }; events: { node: string; [key: string]: unknown }[]; candidates: Candidate[]; verification: { claim_text: string; status: string; evidence_ids: string[] }[]; route?: string; cache_level?: string; answer_mode?: string; risk_score?: number; verification_triggered?: boolean; model_calls?: number; latency_ms?: number };
 
 const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 const tabs = ["sources", "knowledge", "ask", "evaluation"] as const;
@@ -54,10 +54,45 @@ function Knowledge() {
   return <Panel label="knowledge" title="inspect knowledge"><div className="stats">{summary ? Object.entries(summary).map(([name, value]) => <Row key={name} name={name} status={String(value)} />) : <p className="muted">loading summary</p>}</div><div className="form-row"><input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="search the knowledge base" onKeyDown={(event) => event.key === "Enter" && void search()} /><button onClick={() => void search()}>search</button></div>{error && <p className="error">{error}</p>}{result && <CandidateList result={result} />}</Panel>;
 }
 
-function Ask() {
+function LegacyAsk() {
   const [question, setQuestion] = useState(""); const [result, setResult] = useState<QueryResult | null>(null); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [duration, setDuration] = useState<number | null>(null);
   async function ask() { if (!question.trim()) return; setBusy(true); setError(null); const started = performance.now(); try { setResult(await api<QueryResult>("/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question }) })); setDuration(Math.round(performance.now() - started)); } catch (caught) { setError(caught instanceof Error ? caught.message : "query failed"); } finally { setBusy(false); } }
   return <Panel label="ask" title="ask synapse"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="ask a question about the corpus" rows={4} /><button onClick={() => void ask()} disabled={busy || !question.trim()}>{busy ? "running" : "ask"}</button>{error && <p className="error">{error}</p>}{result && <div className="answer"><h3>answer</h3><p className="answer-text">{result.answer}</p><h3>verification</h3>{result.verification.map((item, index) => <div className="claim" key={index}><span>{item.status}</span><p>{item.claim_text}</p><small>evidence: {item.evidence_ids.join(", ") || "none"}</small></div>)}<h3>execution</h3><p className="muted">route: {result.route ?? result.plan.kind ?? "?"} · tools: {result.plan.tools.join(", ")} · cache: {result.cache_level ?? "none"}</p><p className="muted">candidates: {result.candidates.length} · verified: {result.verification.length} · model calls: {result.model_calls ?? "?"} · latency: {result.latency_ms ?? duration ?? "?"}ms</p><p className="muted">nodes: {result.events.map((event) => event.node).join(" → ")}</p></div>}</Panel>;
+}
+
+function Ask() {
+  const [question, setQuestion] = useState("");
+  const [result, setResult] = useState<QueryResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function ask() {
+    if (!question.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      setResult(await api<QueryResult>("/api/query", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      }));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "query failed");
+    } finally { setBusy(false); }
+  }
+
+  return <Panel label="ask" title="ask synapse">
+    <textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="ask a question about the corpus" rows={4} />
+    <button onClick={() => void ask()} disabled={busy || !question.trim()}>{busy ? "running" : "ask"}</button>
+    {error && <p className="error">{error}</p>}
+    {result && <div className="answer">
+      <h3>answer</h3><p className="answer-text">{result.answer}</p>
+      <h3>verification</h3>{result.verification.map((item, index) => <div className="claim" key={index}><span>{item.status}</span><p>{item.claim_text}</p><small>evidence: {item.evidence_ids.join(", ") || "none"}</small></div>)}
+      <h3>execution</h3>
+      <p className="muted">route: {result.route ?? result.plan.kind ?? "?"} · tools: {result.plan.tools.join(", ")} · cache: {result.cache_level ?? "none"}</p>
+      <p className="muted">mode: {result.answer_mode ?? "?"} · risk: {result.risk_score ?? "?"} · extra verification: {result.verification_triggered ? "yes" : "no"}</p>
+      <p className="muted">candidates: {result.candidates.length} · verified: {result.verification.length} · model calls: {result.model_calls ?? "?"} · latency: {result.latency_ms ?? "?"}ms</p>
+      <p className="muted">nodes: {result.events.map((event) => event.node).join(" → ")}</p>
+    </div>}
+  </Panel>;
 }
 
 function Evaluation() {
