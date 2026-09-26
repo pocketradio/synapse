@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from synapse.cache import RetrievalCache
 from synapse.config import get_settings
 from synapse.embeddings import ingest_file
 from synapse.health import check_database, check_ollama, overall_status
@@ -15,6 +16,7 @@ from synapse.workflow import BoundedQueryWorkflow
 settings = get_settings()
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 query_workflow = BoundedQueryWorkflow(engine, settings)
+retrieval_cache = RetrievalCache(settings)
 
 app = FastAPI(
     title="Synapse API",
@@ -96,7 +98,9 @@ async def retrieval_search(request: RetrievalRequest) -> dict:
     if request.strategy not in {"lexical", "vector", "hybrid", "hybrid_graph"}:
         raise HTTPException(status_code=400, detail="Unsupported retrieval strategy")
     try:
-        return await retrieve(engine, settings, request.question, request.strategy)
+        return await retrieve(
+            engine, settings, request.question, request.strategy, cache=retrieval_cache
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Retrieval is unavailable") from exc
 
