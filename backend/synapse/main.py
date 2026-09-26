@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from synapse.config import get_settings
 from synapse.health import check_database, check_ollama, overall_status
-from synapse.ingestion import ingest_file
+from synapse.embeddings import ingest_file
 
 settings = get_settings()
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
