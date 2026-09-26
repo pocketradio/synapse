@@ -100,6 +100,7 @@ def score_answer(result: dict[str, Any], case: BenchmarkCase) -> dict[str, float
         "model_calls": float(sum(
             bool(event.get("model_call")) for event in result.get("events", [])
         )),
+        "model_error": float(any(event.get("error") for event in result.get("events", []))),
     }
 
 
@@ -109,7 +110,8 @@ def summarize_answers(
     if not scores:
         return {"citation_precision": None, "citation_recall": None,
                 "supported_claim_rate": None, "correct_abstention": None,
-                "median_latency_ms": None, "median_model_calls": None}
+                "median_latency_ms": None, "median_model_calls": None,
+                "model_error_rate": None}
     return {
         "citation_precision": round(
             statistics.mean(item["citation_precision"] for item in scores), 4
@@ -125,6 +127,7 @@ def summarize_answers(
         ),
         "median_latency_ms": round(statistics.median(latencies), 2) if latencies else None,
         "median_model_calls": round(statistics.median(item["model_calls"] for item in scores), 2),
+        "model_error_rate": round(statistics.mean(item["model_error"] for item in scores), 4),
     }
 
 
@@ -144,7 +147,11 @@ async def run_answer_benchmark(
     results = await asyncio.gather(*(run_case(case) for case in cases))
     scores = [score for score, _ in results]
     latencies = [latency for _, latency in results]
-    return {"questions": len(cases), "answer_workflow": summarize_answers(scores, latencies)}
+    return {
+        "questions": len(cases),
+        "answer_mode": settings.answer_mode,
+        "answer_workflow": summarize_answers(scores, latencies),
+    }
 
 
 async def agent_selected_retrieve(engine: Any, settings: Any, question: str) -> dict[str, Any]:
@@ -209,8 +216,15 @@ async def run_benchmark(
     return report
 
 
-async def main(output: Path | None, answers_only: bool, limit: int | None) -> None:
+async def main(
+    output: Path | None,
+    answers_only: bool,
+    limit: int | None,
+    answer_mode: str | None,
+) -> None:
     settings = get_settings()
+    if answer_mode:
+        settings = settings.model_copy(update={"answer_mode": answer_mode})
     engine = create_async_engine(settings.database_url, pool_pre_ping=True)
     try:
         cases = load_benchmark()[:limit] if limit else None
@@ -232,5 +246,10 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, help="also write the JSON report to this path")
     parser.add_argument("--answers-only", action="store_true")
     parser.add_argument("--limit", type=int, help="run only the first N benchmark questions")
+    parser.add_argument(
+        "--answer-mode",
+        choices=("one_call", "risk_based", "two_call"),
+        help="answer workflow mode for answer benchmarks",
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.output, args.answers_only, args.limit))
+    asyncio.run(main(args.output, args.answers_only, args.limit, args.answer_mode))
