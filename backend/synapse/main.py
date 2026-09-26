@@ -10,9 +10,11 @@ from synapse.config import get_settings
 from synapse.embeddings import ingest_file
 from synapse.health import check_database, check_ollama, overall_status
 from synapse.retrieval import retrieve
+from synapse.workflow import BoundedQueryWorkflow
 
 settings = get_settings()
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
+query_workflow = BoundedQueryWorkflow(engine, settings)
 
 app = FastAPI(
     title="Synapse API",
@@ -31,6 +33,10 @@ app.add_middleware(
 class RetrievalRequest(BaseModel):
     question: str
     strategy: str = "hybrid_graph"
+
+
+class QueryRequest(BaseModel):
+    question: str
 
 
 @app.get("/api/health")
@@ -93,6 +99,14 @@ async def retrieval_search(request: RetrievalRequest) -> dict:
         return await retrieve(engine, settings, request.question, request.strategy)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Retrieval is unavailable") from exc
+
+
+@app.post("/api/query")
+async def query(request: QueryRequest) -> dict:
+    try:
+        return await query_workflow.run(request.question)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Query workflow is unavailable") from exc
 
 
 @app.get("/api/knowledge/chunks/{chunk_id}")
