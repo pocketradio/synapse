@@ -11,6 +11,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from synapse.answering import (
+    Claim,
+    ClaimGenerator,
+    ClaimVerifier,
+    OllamaJsonClient,
+    VerificationResult,
+    render_answer,
+    validate_citations,
+)
 from synapse.config import Settings
 from synapse.retrieval import (
     EvidenceCandidate,
@@ -82,6 +91,10 @@ class QueryState(TypedDict, total=False):
     events: list[dict]
     refinement_used: bool
     query_run_id: str
+    evidence_items: list[dict]
+    claims: list[Claim]
+    verification: list[VerificationResult]
+    answer: str
 
 
 class BoundedQueryWorkflow:
@@ -91,9 +104,14 @@ class BoundedQueryWorkflow:
         settings: Settings,
         planner: Planner | None = None,
         tools: dict[ToolName, Tool] | None = None,
+        claim_generator: ClaimGenerator | None = None,
+        claim_verifier: ClaimVerifier | None = None,
     ):
         self.engine = engine
         self.planner = planner or OllamaPlanner(settings)
+        client = OllamaJsonClient(settings)
+        self.claim_generator = claim_generator or ClaimGenerator(client)
+        self.claim_verifier = claim_verifier or ClaimVerifier(client)
         self.tools = tools or {
             "lexical": lambda question: lexical_search(engine, question),
             "vector": lambda question: vector_search(engine, settings, question),
@@ -104,13 +122,21 @@ class BoundedQueryWorkflow:
         graph.add_node("retrieve", self._retrieve)
         graph.add_node("refine_once", self._refine_once)
         graph.add_node("persist", self._persist)
+        graph.add_node("generate_claims", self._generate_claims)
+        graph.add_node("verify_claims", self._verify_claims)
+        graph.add_node("persist_claims", self._persist_claims)
+        graph.add_node("render_answer", self._render_answer)
         graph.add_edge(START, "analyze")
         graph.add_edge("analyze", "retrieve")
         graph.add_conditional_edges(
             "retrieve", self._should_refine, {"refine": "refine_once", "persist": "persist"}
         )
         graph.add_edge("refine_once", "persist")
-        graph.add_edge("persist", END)
+        graph.add_edge("persist", "generate_claims")
+        graph.add_edge("generate_claims", "verify_claims")
+        graph.add_edge("verify_claims", "persist_claims")
+        graph.add_edge("persist_claims", "render_answer")
+        graph.add_edge("render_answer", END)
         self.graph = graph.compile()
 
     async def run(self, question: str) -> dict:
@@ -125,6 +151,9 @@ class BoundedQueryWorkflow:
             "plan": state["plan"].model_dump(),
             "events": state["events"],
             "candidates": [candidate.as_dict() for candidate in state["candidates"]],
+            "claims": [claim.model_dump() for claim in state.get("claims", [])],
+            "verification": [result.model_dump() for result in state.get("verification", [])],
+            "answer": state.get("answer", "I cannot answer this from the available evidence."),
         }
 
     async def _analyze(self, state: QueryState) -> QueryState:
@@ -169,28 +198,91 @@ class BoundedQueryWorkflow:
                 INSERT INTO query_runs (question) VALUES (:question) RETURNING id
             """), {"question": state["question"]})
             query_run_id = str(query_run.scalar_one())
+            evidence_items = []
             for rank, candidate in enumerate(state["candidates"], 1):
                 if candidate.kind == "relationship":
-                    await connection.execute(text("""
+                    result = await connection.execute(text("""
                         INSERT INTO evidence (query_run_id, relationship_id, rank)
                         VALUES (CAST(:run_id AS uuid), CAST(:evidence_id AS uuid), :rank)
+                        RETURNING id
                     """), {
                         "run_id": query_run_id,
                         "evidence_id": candidate.candidate_id.removeprefix("relationship:"),
                         "rank": rank,
                     })
                 else:
-                    await connection.execute(text("""
+                    result = await connection.execute(text("""
                         INSERT INTO evidence (query_run_id, chunk_id, rank)
                         VALUES (CAST(:run_id AS uuid), CAST(:evidence_id AS uuid), :rank)
+                        RETURNING id
                     """), {
                         "run_id": query_run_id,
                         "evidence_id": candidate.candidate_id,
                         "rank": rank,
                     })
+                evidence_items.append({
+                    "evidence_id": str(result.scalar_one()),
+                    **candidate.as_dict(),
+                })
         return {
             "query_run_id": query_run_id,
+            "evidence_items": evidence_items,
             "events": state["events"] + [{
                 "node": "persist", "query_run_id": query_run_id,
             }],
+        }
+
+    async def _generate_claims(self, state: QueryState) -> QueryState:
+        claims = await self.claim_generator.generate(
+            state["question"], state.get("evidence_items", [])
+        )
+        return {
+            "claims": claims,
+            "events": state["events"] + [{"node": "generate_claims", "claim_count": len(claims)}],
+        }
+
+    async def _verify_claims(self, state: QueryState) -> QueryState:
+        results = await self.claim_verifier.verify(
+            state.get("claims", []), state.get("evidence_items", [])
+        )
+        results = validate_citations(results, state.get("evidence_items", []))
+        return {
+            "verification": results,
+            "events": state["events"] + [{
+                "node": "verify_claims",
+                "verification_count": len(results),
+            }],
+        }
+
+    async def _persist_claims(self, state: QueryState) -> QueryState:
+        evidence_ids = {item["evidence_id"] for item in state.get("evidence_items", [])}
+        async with self.engine.begin() as connection:
+            for result in state.get("verification", []):
+                claim = await connection.execute(text("""
+                    INSERT INTO claims (query_run_id, claim_text, verification_status)
+                    VALUES (CAST(:run_id AS uuid), :claim_text, :status)
+                    RETURNING id
+                """), {
+                    "run_id": state["query_run_id"],
+                    "claim_text": result.claim_text,
+                    "status": result.status,
+                })
+                claim_id = claim.scalar_one()
+                for evidence_id in result.evidence_ids:
+                    if evidence_id in evidence_ids:
+                        await connection.execute(text("""
+                            INSERT INTO citations (claim_id, evidence_id)
+                            VALUES (CAST(:claim_id AS uuid), CAST(:evidence_id AS uuid))
+                        """), {"claim_id": claim_id, "evidence_id": evidence_id})
+        return {
+            "events": state["events"] + [{
+                "node": "persist_claims",
+                "claim_count": len(state.get("verification", [])),
+            }],
+        }
+
+    async def _render_answer(self, state: QueryState) -> QueryState:
+        return {
+            "answer": render_answer(state.get("verification", [])),
+            "events": state["events"] + [{"node": "render_answer"}],
         }
