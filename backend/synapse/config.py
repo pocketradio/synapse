@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     chat_model: str = "qwen3.5:9b"
     embedding_model: str = "qwen3-embedding:0.6b"
-    cors_origins: str = "http://localhost:3000"
+    cors_origins: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(
         env_file=("../.env", ".env"),
@@ -25,4 +25,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
