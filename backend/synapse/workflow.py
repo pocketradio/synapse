@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import re
+import logging
+import time
 from collections.abc import Awaitable, Callable
-from typing import Literal, Protocol, TypedDict
+from typing import Protocol, TypedDict
 
 import httpx
 from langgraph.graph import END, START, StateGraph
@@ -15,26 +16,36 @@ from synapse.answering import (
     Claim,
     ClaimGenerator,
     ClaimVerifier,
-    OllamaJsonClient,
     VerificationResult,
+    create_json_model_client,
     render_answer,
     validate_citations,
+    validate_claims,
 )
+from synapse.cache import RetrievalCache
 from synapse.config import Settings
 from synapse.retrieval import (
     EvidenceCandidate,
     graph_search,
     lexical_search,
     reciprocal_rank_fusion,
+    retrieve,
     vector_search,
 )
+from synapse.routing import route_question
+from synapse.workflow_types import ToolName
 
-ToolName = Literal["lexical", "vector", "graph"]
+logger = logging.getLogger(__name__)
+
 Tool = Callable[[str], Awaitable[list[EvidenceCandidate]]]
 
 
 class QueryPlan(BaseModel):
     tools: list[ToolName] = Field(min_length=1, max_length=3)
+    kind: str = "hybrid"
+    generate_answer: bool = True
+    verify_answer: bool = True
+    reason: str = ""
 
 
 class Planner(Protocol):
@@ -54,34 +65,38 @@ class OllamaPlanner:
         )
         try:
             async with httpx.AsyncClient(
-                base_url=self.settings.ollama_base_url, timeout=60
+                base_url=self.settings.ollama_base_url, timeout=15
             ) as client:
                 response = await client.post("/api/chat", json={
                     "model": self.settings.chat_model,
                     "stream": False,
                     "format": "json",
+                    "think": False,
                     "messages": [{"role": "user", "content": prompt}],
                 })
                 response.raise_for_status()
                 content = response.json()["message"]["content"]
             plan = QueryPlan.model_validate_json(content)
-            required = self._fallback(question).tools
-            return QueryPlan(tools=list(dict.fromkeys([*required, *plan.tools])))
+            required = self._fallback(question)
+            return QueryPlan(
+                tools=list(dict.fromkeys([*required.tools, *plan.tools])),
+                kind=required.kind,
+                generate_answer=required.generate_answer,
+                verify_answer=required.verify_answer,
+                reason="agent planner with deterministic safety requirements",
+            )
         except Exception:
             return self._fallback(question)
 
     @staticmethod
     def _fallback(question: str) -> QueryPlan:
-        tools: list[ToolName] = []
-        if re.search(r"[A-Za-z_]\w*(?:\(\)|Service|Queue|Redis)", question) or re.search(
-            r"\b[a-z]+[A-Z][A-Za-z]*\b", question
-        ):
-            tools.append("lexical")
-        if re.search(r"depend|use|relationship|connect|call", question, re.IGNORECASE):
-            tools.append("graph")
-        if not tools or re.search(r"how|why|recover|explain", question, re.IGNORECASE):
-            tools.append("vector")
-        return QueryPlan(tools=list(dict.fromkeys(tools)))
+        decision = route_question(question)
+        return QueryPlan(**decision.model_dump())
+
+
+class DeterministicPlanner:
+    async def plan(self, question: str) -> QueryPlan:
+        return QueryPlan(**route_question(question).model_dump())
 
 
 class QueryState(TypedDict, total=False):
@@ -95,6 +110,7 @@ class QueryState(TypedDict, total=False):
     claims: list[Claim]
     verification: list[VerificationResult]
     answer: str
+    cache_level: str
 
 
 class BoundedQueryWorkflow:
@@ -106,10 +122,13 @@ class BoundedQueryWorkflow:
         tools: dict[ToolName, Tool] | None = None,
         claim_generator: ClaimGenerator | None = None,
         claim_verifier: ClaimVerifier | None = None,
+        cache: RetrievalCache | None = None,
     ):
         self.engine = engine
-        self.planner = planner or OllamaPlanner(settings)
-        client = OllamaJsonClient(settings)
+        self.settings = settings
+        self.planner = planner or DeterministicPlanner()
+        self.cache = cache or RetrievalCache(settings)
+        client = create_json_model_client(settings)
         self.claim_generator = claim_generator or ClaimGenerator(client)
         self.claim_verifier = claim_verifier or ClaimVerifier(client)
         self.tools = tools or {
@@ -117,6 +136,7 @@ class BoundedQueryWorkflow:
             "vector": lambda question: vector_search(engine, settings, question),
             "graph": lambda question: graph_search(engine, question),
         }
+        self.custom_tools = tools is not None
         graph = StateGraph(QueryState)
         graph.add_node("analyze", self._analyze)
         graph.add_node("retrieve", self._retrieve)
@@ -140,6 +160,7 @@ class BoundedQueryWorkflow:
         self.graph = graph.compile()
 
     async def run(self, question: str) -> dict:
+        started = time.perf_counter()
         state = await self.graph.ainvoke({
             "question": question,
             "events": [],
@@ -154,26 +175,54 @@ class BoundedQueryWorkflow:
             "claims": [claim.model_dump() for claim in state.get("claims", [])],
             "verification": [result.model_dump() for result in state.get("verification", [])],
             "answer": state.get("answer", "I cannot answer this from the available evidence."),
+            "route": state["plan"].kind,
+            "cache_level": state.get("cache_level", "none"),
+            "model_calls": sum(
+                event.get("model_call", False)
+                for event in state["events"]
+            ),
+            "latency_ms": round((time.perf_counter() - started) * 1000, 2),
         }
 
     async def _analyze(self, state: QueryState) -> QueryState:
         plan = await self.planner.plan(state["question"])
         return {
             "plan": plan,
-            "events": state["events"] + [{"node": "analyze", "tools": plan.tools}],
+            "events": state["events"] + [{
+                "node": "analyze",
+                "tools": plan.tools,
+                "model_call": isinstance(self.planner, OllamaPlanner),
+            }],
         }
 
     async def _retrieve(self, state: QueryState) -> QueryState:
-        selected = [self.tools[name](state["question"]) for name in state["plan"].tools]
-        result_sets = await asyncio.gather(*selected)
-        candidates = reciprocal_rank_fusion(*result_sets)
+        started = time.perf_counter()
+        if self.custom_tools:
+            selected = [self.tools[name](state["question"]) for name in state["plan"].tools]
+            result_sets = await asyncio.gather(*selected)
+            candidates = reciprocal_rank_fusion(*result_sets)
+            cache_level = "none"
+        else:
+            result = await retrieve(
+                self.engine,
+                self.settings,
+                state["question"],
+                strategy=state["plan"].kind,
+                selected_tools=state["plan"].tools,
+                cache=self.cache,
+            )
+            candidates = [EvidenceCandidate(**candidate) for candidate in result["candidates"]]
+            cache_level = result.get("cache_level", "none")
         return {
             "candidates": candidates,
             "events": state["events"] + [{
                 "node": "retrieve",
                 "tools": state["plan"].tools,
                 "candidate_count": len(candidates),
+                "cache_level": cache_level,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
             }],
+            "cache_level": cache_level,
         }
 
     @staticmethod
@@ -233,24 +282,64 @@ class BoundedQueryWorkflow:
         }
 
     async def _generate_claims(self, state: QueryState) -> QueryState:
-        claims = await self.claim_generator.generate(
-            state["question"], state.get("evidence_items", [])
-        )
+        if not state["plan"].generate_answer:
+            return {
+                "claims": [],
+                "events": state["events"] + [{"node": "generate_claims", "skipped": True}],
+            }
+        try:
+            claims = await self.claim_generator.generate(
+                state["question"], state.get("evidence_items", [])
+            )
+            claims = validate_claims(claims, state.get("evidence_items", []))
+            error = None
+        except Exception as exc:
+            logger.warning("claim generation failed: %s", exc)
+            claims = []
+            error = type(exc).__name__
         return {
             "claims": claims,
-            "events": state["events"] + [{"node": "generate_claims", "claim_count": len(claims)}],
+            "events": state["events"] + [{
+                "node": "generate_claims",
+                "claim_count": len(claims),
+                "model_call": True,
+                **({"error": error} if error else {}),
+            }],
         }
 
     async def _verify_claims(self, state: QueryState) -> QueryState:
-        results = await self.claim_verifier.verify(
-            state.get("claims", []), state.get("evidence_items", [])
-        )
+        if not state["plan"].verify_answer or not state.get("claims"):
+            return {
+                "verification": [],
+                "events": state["events"] + [{
+                    "node": "verify_claims", "skipped": True, "model_call": False,
+                }],
+            }
+        try:
+            results = await self.claim_verifier.verify(
+                state["claims"], state.get("evidence_items", [])
+            )
+            error = None
+        except Exception as exc:
+            logger.warning("claim verification failed: %s", exc)
+            results = [
+                VerificationResult(
+                    claim_text=claim.claim_text,
+                    evidence_ids=[],
+                    status="unsupported",
+                    reason="verification unavailable",
+                )
+                for claim in state["claims"]
+            ]
+            error = type(exc).__name__
         results = validate_citations(results, state.get("evidence_items", []))
         return {
             "verification": results,
             "events": state["events"] + [{
                 "node": "verify_claims",
                 "verification_count": len(results),
+                "model_call": True,
+                **({"error": error} if error else {}),
             }],
         }
 
@@ -282,6 +371,14 @@ class BoundedQueryWorkflow:
         }
 
     async def _render_answer(self, state: QueryState) -> QueryState:
+        if not state["plan"].generate_answer:
+            if not state.get("evidence_items"):
+                return {"answer": "I cannot answer this from the available evidence."}
+            evidence = state["evidence_items"][0]
+            return {
+                "answer": f"{evidence['content']} [{evidence['evidence_id']}]",
+                "events": state["events"] + [{"node": "render_answer", "fast_path": True}],
+            }
         return {
             "answer": render_answer(state.get("verification", [])),
             "events": state["events"] + [{"node": "render_answer"}],
