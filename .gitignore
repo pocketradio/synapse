@@ -9,3 +9,5 @@ frontend/.next/
 frontend/dist/
 coverage/
 tmp/
+evaluation_report.json
+evaluation_answers_report.json
