@@ -15,6 +15,16 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+  redis:
+    image: redis/redis-stack-server:7.4.0-v3
+    command: redis-stack-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
 volumes:
   synapse-postgres:
