@@ -111,6 +111,33 @@ class QueryState(TypedDict, total=False):
     verification: list[VerificationResult]
     answer: str
     cache_level: str
+    risk_score: int
+    verification_needed: bool
+
+
+def calculate_risk_score(
+    plan: QueryPlan,
+    evidence: list[dict],
+    verification: list[VerificationResult],
+) -> int:
+    score = 0
+    if not evidence:
+        score += 3
+    elif plan.kind != "exact":
+        if len(evidence) < 2:
+            score += 1
+        if plan.kind in {"relationship", "hybrid"} and len(
+            {item.get("source_name") for item in evidence}
+        ) < 2:
+            score += 1
+    for result in verification:
+        if result.status == "conflicting":
+            score += 2
+        elif result.status == "unsupported" or not result.evidence_ids:
+            score += 2
+        elif result.status == "partial":
+            score += 1
+    return score
 
 
 class BoundedQueryWorkflow:
@@ -153,7 +180,11 @@ class BoundedQueryWorkflow:
         )
         graph.add_edge("refine_once", "persist")
         graph.add_edge("persist", "generate_claims")
-        graph.add_edge("generate_claims", "verify_claims")
+        graph.add_conditional_edges(
+            "generate_claims",
+            self._should_verify,
+            {"verify": "verify_claims", "persist": "persist_claims"},
+        )
         graph.add_edge("verify_claims", "persist_claims")
         graph.add_edge("persist_claims", "render_answer")
         graph.add_edge("render_answer", END)
@@ -177,6 +208,12 @@ class BoundedQueryWorkflow:
             "answer": state.get("answer", "I cannot answer this from the available evidence."),
             "route": state["plan"].kind,
             "cache_level": state.get("cache_level", "none"),
+            "risk_score": state.get("risk_score", 0),
+            "answer_mode": self.settings.answer_mode,
+            "verification_triggered": any(
+                event.get("node") == "verify_claims" and event.get("model_call")
+                for event in state["events"]
+            ),
             "model_calls": sum(
                 event.get("model_call", False)
                 for event in state["events"]
@@ -285,27 +322,61 @@ class BoundedQueryWorkflow:
         if not state["plan"].generate_answer:
             return {
                 "claims": [],
+                "verification": [],
+                "verification_needed": False,
                 "events": state["events"] + [{"node": "generate_claims", "skipped": True}],
             }
         try:
-            claims = await self.claim_generator.generate(
-                state["question"], state.get("evidence_items", [])
-            )
-            claims = validate_claims(claims, state.get("evidence_items", []))
+            evidence = state.get("evidence_items", [])
+            if self.settings.answer_mode == "two_call":
+                claims = await self.claim_generator.generate(state["question"], evidence)
+                claims = validate_claims(claims, evidence)
+                verification = []
+                risk_score = 0
+                verification_needed = bool(claims)
+            else:
+                verification = validate_citations(
+                    await self.claim_generator.generate_grounded(state["question"], evidence),
+                    evidence,
+                )
+                claims = [
+                    Claim(claim_text=result.claim_text, evidence_ids=result.evidence_ids)
+                    for result in verification
+                    if result.evidence_ids
+                ]
+                risk_score = calculate_risk_score(state["plan"], evidence, verification)
+                verification_needed = (
+                    self.settings.answer_mode == "risk_based"
+                    and bool(claims)
+                    and risk_score >= self.settings.verification_risk_threshold
+                )
             error = None
         except Exception as exc:
             logger.warning("claim generation failed: %s", exc)
             claims = []
+            verification = []
+            risk_score = 3
+            verification_needed = False
             error = type(exc).__name__
         return {
             "claims": claims,
+            "verification": verification,
+            "risk_score": risk_score,
+            "verification_needed": verification_needed,
             "events": state["events"] + [{
                 "node": "generate_claims",
                 "claim_count": len(claims),
                 "model_call": True,
+                "answer_mode": self.settings.answer_mode,
+                "risk_score": risk_score,
+                "verification_needed": verification_needed,
                 **({"error": error} if error else {}),
             }],
         }
+
+    @staticmethod
+    def _should_verify(state: QueryState) -> str:
+        return "verify" if state.get("verification_needed") else "persist"
 
     async def _verify_claims(self, state: QueryState) -> QueryState:
         if not state["plan"].verify_answer or not state.get("claims"):

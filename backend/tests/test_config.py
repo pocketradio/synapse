@@ -24,3 +24,10 @@ def test_openrouter_model_is_selected_when_configured() -> None:
     )
 
     assert settings.active_chat_model == "google/gemma-4-26b-a4b-it:free"
+
+
+def test_risk_based_answers_are_the_default() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.answer_mode == "risk_based"
+    assert settings.verification_risk_threshold == 2

@@ -2,6 +2,7 @@ from synapse.answering import (
     Claim,
     VerificationResult,
     parse_claims,
+    parse_grounded_answer,
     render_answer,
     validate_citations,
     validate_claims,
@@ -41,3 +42,17 @@ def test_single_claim_response_is_normalized() -> None:
 
     assert len(claims) == 1
     assert claims[0].claim_text == "redis is used"
+
+
+def test_one_call_answer_contains_support_status() -> None:
+    results = parse_grounded_answer({
+        "results": [{
+            "claim_text": "redis is used",
+            "evidence_ids": ["real"],
+            "status": "supported",
+            "confidence": 0.9,
+        }]
+    })
+
+    assert results[0].status == "supported"
+    assert results[0].confidence == 0.9

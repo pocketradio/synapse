@@ -23,6 +23,7 @@ class VerificationResult(BaseModel):
     evidence_ids: list[str] = Field(default_factory=list)
     status: VerificationStatus
     reason: str = ""
+    confidence: float | None = Field(default=None, ge=0, le=1)
 
 
 class ClaimsPayload(BaseModel):
@@ -33,6 +34,10 @@ class ClaimsPayload(BaseModel):
 class VerificationPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     results: list[VerificationResult] = Field(default_factory=list, max_length=8)
+
+
+class GroundedAnswerPayload(VerificationPayload):
+    """One-call answer contract: claims, citations, and support status together."""
 
 
 def parse_claims(payload: dict) -> list[Claim]:
@@ -47,6 +52,10 @@ def parse_verification(payload: dict) -> list[VerificationResult]:
         return VerificationPayload.model_validate(payload).results
     except ValidationError:
         return [VerificationResult.model_validate(payload)]
+
+
+def parse_grounded_answer(payload: dict) -> list[VerificationResult]:
+    return GroundedAnswerPayload.model_validate(payload).results
 
 
 class ModelResponseError(RuntimeError):
@@ -125,6 +134,21 @@ class ClaimGenerator:
         )
         payload = await self.client.complete(prompt)
         return parse_claims(payload)
+
+    async def generate_grounded(
+        self, question: str, evidence: list[dict]
+    ) -> list[VerificationResult]:
+        if not evidence:
+            return []
+        prompt = (
+            "Answer using only the supplied evidence. Return JSON with a results array. "
+            "Each result must contain claim_text, evidence_ids, status, reason, and optional "
+            "confidence. Status must be supported, partial, unsupported, or conflicting. "
+            "Every material claim must cite evidence_ids. Do not add facts "
+            "not present in evidence.\n"
+            f"Question: {question}\nEvidence: {json.dumps(evidence)}"
+        )
+        return parse_grounded_answer(await self.client.complete(prompt))
 
 
 class ClaimVerifier:

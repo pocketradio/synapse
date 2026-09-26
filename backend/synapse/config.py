@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +20,8 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 86400
     semantic_cache_threshold: float = 0.95
     embedding_batch_size: int = 32
+    answer_mode: Literal["one_call", "risk_based", "two_call"] = "risk_based"
+    verification_risk_threshold: int = 2
 
     @property
     def active_chat_model(self) -> str:
