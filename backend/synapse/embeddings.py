@@ -11,14 +11,23 @@ from synapse.config import Settings
 from synapse.ingestion import NormalizedChunk, normalize_file
 
 
-async def embed_chunks(settings: Settings, chunks: list[NormalizedChunk]) -> list[list[float]]:
+async def embed_texts(settings: Settings, texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
     async with httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=120) as client:
-        response = await client.post("/api/embed", json={
-            "model": settings.embedding_model,
-            "input": [chunk.content for chunk in chunks],
-        })
-        response.raise_for_status()
-        return response.json()["embeddings"]
+        embeddings: list[list[float]] = []
+        for start in range(0, len(texts), settings.embedding_batch_size):
+            response = await client.post("/api/embed", json={
+                "model": settings.embedding_model,
+                "input": texts[start:start + settings.embedding_batch_size],
+            })
+            response.raise_for_status()
+            embeddings.extend(response.json()["embeddings"])
+        return embeddings
+
+
+async def embed_chunks(settings: Settings, chunks: list[NormalizedChunk]) -> list[list[float]]:
+    return await embed_texts(settings, [chunk.content for chunk in chunks])
 
 
 async def ingest_file(
