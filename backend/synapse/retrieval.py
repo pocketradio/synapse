@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -35,6 +36,9 @@ class EvidenceCandidate:
 
 
 async def lexical_search(engine: AsyncEngine, question: str) -> list[EvidenceCandidate]:
+    identifier = next(
+        iter(re.findall(r"\b[a-z]+[A-Z][A-Za-z]*\b|\b\w+\(\)", question)), ""
+    )
     query = text("""
         SELECT c.id::text AS candidate_id, 'chunk' AS kind, c.content,
                s.id::text AS source_id, s.name AS source_name, c.locator,
@@ -44,11 +48,15 @@ async def lexical_search(engine: AsyncEngine, question: str) -> list[EvidenceCan
         JOIN sources s ON s.id = r.source_id
         WHERE c.search_vector @@ plainto_tsquery('english', :question)
            OR lower(c.content) LIKE '%' || lower(:question) || '%'
+           OR (:identifier <> '' AND lower(c.content) LIKE '%' || lower(:identifier) || '%')
         ORDER BY score DESC, c.id
         LIMIT 20
     """)
     async with engine.connect() as connection:
-        rows = (await connection.execute(query, {"question": question})).mappings().all()
+        rows = (await connection.execute(query, {
+            "question": question,
+            "identifier": identifier,
+        })).mappings().all()
     return [EvidenceCandidate(**dict(row), rank=index) for index, row in enumerate(rows, 1)]
 
 
