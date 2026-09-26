@@ -2,12 +2,14 @@ import asyncio
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from synapse.config import get_settings
 from synapse.embeddings import ingest_file
 from synapse.health import check_database, check_ollama, overall_status
+from synapse.retrieval import retrieve
 
 settings = get_settings()
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -24,6 +26,11 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
+
+
+class RetrievalRequest(BaseModel):
+    question: str
+    strategy: str = "hybrid_graph"
 
 
 @app.get("/api/health")
@@ -76,6 +83,16 @@ async def ingest_files(files: list[UploadFile] = File(...)) -> dict:  # noqa: B0
                 status_code=400, detail=f"Could not ingest {file.filename}"
             ) from exc
     return {"files": results}
+
+
+@app.post("/api/retrieval/search")
+async def retrieval_search(request: RetrievalRequest) -> dict:
+    if request.strategy not in {"lexical", "vector", "hybrid", "hybrid_graph"}:
+        raise HTTPException(status_code=400, detail="Unsupported retrieval strategy")
+    try:
+        return await retrieve(engine, settings, request.question, request.strategy)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Retrieval is unavailable") from exc
 
 
 @app.get("/api/knowledge/chunks/{chunk_id}")
