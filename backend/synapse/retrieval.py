@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import defaultdict
 from dataclasses import dataclass
 
-import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from synapse.cache import RetrievalCache
 from synapse.config import Settings
+from synapse.embeddings import embed_texts
 
 
 @dataclass
@@ -61,15 +63,13 @@ async def lexical_search(engine: AsyncEngine, question: str) -> list[EvidenceCan
 
 
 async def vector_search(
-    engine: AsyncEngine, settings: Settings, question: str
+    engine: AsyncEngine,
+    settings: Settings,
+    question: str,
+    embedding: list[float] | None = None,
 ) -> list[EvidenceCandidate]:
-    async with httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=120) as client:
-        response = await client.post("/api/embed", json={
-            "model": settings.embedding_model,
-            "input": [question],
-        })
-        response.raise_for_status()
-        embedding = response.json()["embeddings"][0]
+    if embedding is None:
+        embedding = (await embed_texts(settings, [question]))[0]
     query = text("""
         SELECT c.id::text AS candidate_id, 'chunk' AS kind, c.content,
                s.id::text AS source_id, s.name AS source_name, c.locator,
@@ -149,19 +149,66 @@ def reciprocal_rank_fusion(
 
 
 async def retrieve(
-    engine: AsyncEngine, settings: Settings, question: str, strategy: str = "hybrid_graph"
+    engine: AsyncEngine,
+    settings: Settings,
+    question: str,
+    strategy: str = "hybrid_graph",
+    selected_tools: list[str] | None = None,
+    cache: RetrievalCache | None = None,
 ) -> dict:
-    uses_lexical = strategy in {"lexical", "hybrid", "hybrid_graph"}
-    uses_vector = strategy in {"vector", "hybrid", "hybrid_graph"}
-    lexical = await lexical_search(engine, question) if uses_lexical else []
-    vector = await vector_search(engine, settings, question) if uses_vector else []
-    graph = await graph_search(engine, question) if strategy == "hybrid_graph" else []
-    if strategy in {"lexical", "vector"}:
-        candidates = (lexical or vector)[:12]
+    tools = selected_tools or {
+        "lexical": strategy in {"lexical", "hybrid", "hybrid_graph"},
+        "vector": strategy in {"vector", "hybrid", "hybrid_graph"},
+        "graph": strategy == "hybrid_graph",
+    }
+    cache_strategy = ",".join(sorted(tools)) if isinstance(tools, list) else strategy
+    version = await cache.corpus_version(engine) if cache else "no-cache"
+    if cache:
+        exact = await cache.get_exact_retrieval(version, cache_strategy, question)
+        if exact:
+            return {**exact, "cache_level": "exact"}
+
+    uses_lexical = "lexical" in tools if isinstance(tools, list) else tools["lexical"]
+    uses_vector = "vector" in tools if isinstance(tools, list) else tools["vector"]
+    uses_graph = "graph" in tools if isinstance(tools, list) else tools["graph"]
+    embedding = None
+    if uses_vector:
+        embedding = await cache.get_embedding(version, question) if cache else None
+        if embedding is None:
+            embedding = (await embed_texts(settings, [question]))[0]
+            if cache:
+                await cache.set_embedding(version, question, embedding)
+        if cache:
+            semantic = await cache.get_semantic_retrieval(version, cache_strategy, embedding)
+            if semantic:
+                return {**semantic, "cache_level": "semantic"}
+
+    tasks = []
+    if uses_lexical:
+        tasks.append(lexical_search(engine, question))
+    if uses_vector:
+        tasks.append(vector_search(engine, settings, question, embedding))
+    if uses_graph:
+        tasks.append(graph_search(engine, question))
+    result_sets = await asyncio.gather(*tasks)
+    index = 0
+    lexical = result_sets[index] if uses_lexical else []
+    index += int(uses_lexical)
+    vector = result_sets[index] if uses_vector else []
+    index += int(uses_vector)
+    graph = result_sets[index] if uses_graph else []
+    if len([item for item in (uses_lexical, uses_vector, uses_graph) if item]) == 1:
+        candidates = (lexical or vector or graph)[:12]
     else:
         candidates = reciprocal_rank_fusion(lexical, vector, graph)
-    return {
+    result = {
         "strategy": strategy,
         "engine_counts": {"lexical": len(lexical), "vector": len(vector), "graph": len(graph)},
         "candidates": [candidate.as_dict() for candidate in candidates],
+        "cache_level": "none",
     }
+    if cache:
+        await cache.set_exact_retrieval(version, cache_strategy, question, result)
+        if embedding:
+            await cache.set_semantic_retrieval(version, cache_strategy, embedding, result)
+    return result
