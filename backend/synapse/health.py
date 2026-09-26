@@ -28,11 +28,16 @@ async def check_ollama(settings: Settings) -> dict[str, Any]:
             response = await client.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags")
             response.raise_for_status()
         installed = [item["name"] for item in response.json().get("models", [])]
-        chat_ready = any(name.startswith(settings.chat_model) for name in installed)
+        chat_ready = (
+            bool(settings.openrouter_api_key)
+            if settings.chat_provider == "openrouter"
+            else any(name.startswith(settings.chat_model) for name in installed)
+        )
         embedding_ready = any(name.startswith(settings.embedding_model) for name in installed)
         return {
             "status": "healthy" if chat_ready and embedding_ready else "degraded",
-            "chat_model": {"name": settings.chat_model, "available": chat_ready},
+            "chat_model": {"name": settings.active_chat_model, "available": chat_ready},
+            "chat_provider": settings.chat_provider,
             "embedding_model": {
                 "name": settings.embedding_model,
                 "available": embedding_ready,
@@ -40,12 +45,13 @@ async def check_ollama(settings: Settings) -> dict[str, Any]:
             "installed_models": installed,
             "detail": None
             if chat_ready and embedding_ready
-            else "Ollama is running, but one or more required models are missing.",
+            else "The configured chat provider or local embedding model is unavailable.",
         }
     except Exception as exc:
         return {
             "status": "unhealthy",
-            "chat_model": {"name": settings.chat_model, "available": False},
+            "chat_model": {"name": settings.active_chat_model, "available": False},
+            "chat_provider": settings.chat_provider,
             "embedding_model": {"name": settings.embedding_model, "available": False},
             "installed_models": [],
             "detail": str(exc),
@@ -59,4 +65,3 @@ def overall_status(database: dict[str, Any], ollama: dict[str, Any]) -> str:
     if "healthy" in states or "degraded" in states:
         return "degraded"
     return "unhealthy"
-

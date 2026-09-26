@@ -15,3 +15,12 @@ def test_cors_origins_are_parsed() -> None:
 
     assert settings.cors_origin_list == ["http://localhost:3000", "http://localhost:3001"]
 
+
+def test_openrouter_model_is_selected_when_configured() -> None:
+    settings = Settings(
+        _env_file=None,
+        chat_provider="openrouter",
+        openrouter_model="google/gemma-4-26b-a4b-it:free",
+    )
+
+    assert settings.active_chat_model == "google/gemma-4-26b-a4b-it:free"
