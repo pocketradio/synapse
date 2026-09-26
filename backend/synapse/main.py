@@ -1,12 +1,13 @@
 import asyncio
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from synapse.config import get_settings
 from synapse.health import check_database, check_ollama, overall_status
+from synapse.ingestion import ingest_file
 
 settings = get_settings()
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -20,7 +21,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_credentials=True,
-    allow_methods=["GET"],
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -61,6 +62,20 @@ async def knowledge_summary() -> dict:
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Knowledge schema is unavailable") from exc
     return {key: int(value) for key, value in row.items()}
+
+
+@app.post("/api/sources/files")
+async def ingest_files(files: list[UploadFile] = File(...)) -> dict:  # noqa: B008
+    results = []
+    for file in files:
+        content = await file.read()
+        try:
+            results.append(await ingest_file(engine, settings, file.filename or "upload", content))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"Could not ingest {file.filename}"
+            ) from exc
+    return {"files": results}
 
 
 @app.get("/api/knowledge/chunks/{chunk_id}")
