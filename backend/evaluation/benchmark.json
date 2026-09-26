@@ -1,0 +1,22 @@
+[
+  {"id":"q01","category":"exact lookup","question":"Where is processPayment implemented?","expected_sources":["payment_service.py"],"answerable":true},
+  {"id":"q02","category":"exact lookup","question":"What does refundPayment return?","expected_sources":["payment_service.py"],"answerable":true},
+  {"id":"q03","category":"exact lookup","question":"Which cache does checkout use?","expected_sources":["service_config.json","architecture.md"],"answerable":true},
+  {"id":"q04","category":"exact lookup","question":"What is the payment retry queue called?","expected_sources":["service_config.json","architecture.md"],"answerable":true},
+  {"id":"q05","category":"semantic explanation","question":"How does checkout recover from payment failure?","expected_sources":["architecture.md","service_config.json"],"answerable":true},
+  {"id":"q06","category":"semantic explanation","question":"Why is Redis used by CheckoutService?","expected_sources":["architecture.md","service_config.json"],"answerable":true},
+  {"id":"q07","category":"semantic explanation","question":"What happens when the payment provider rejects a charge?","expected_sources":["payment_service.py","architecture.md"],"answerable":true},
+  {"id":"q08","category":"semantic explanation","question":"How are payment retries spaced?","expected_sources":["architecture.md","service_config.json"],"answerable":true},
+  {"id":"q09","category":"relationship","question":"How does CheckoutService depend on Redis?","expected_sources":["architecture.md","service_config.json"],"answerable":true},
+  {"id":"q10","category":"relationship","question":"What connects CheckoutService to PaymentRetryQueue?","expected_sources":["architecture.md","service_config.json"],"answerable":true},
+  {"id":"q11","category":"relationship","question":"Which component calls the payment provider charge method?","expected_sources":["payment_service.py"],"answerable":true},
+  {"id":"q12","category":"relationship","question":"What does PaymentService do with a failed provider response?","expected_sources":["payment_service.py"],"answerable":true},
+  {"id":"q13","category":"cross document","question":"What is the configured maximum number of payment attempts?","expected_sources":["architecture.md","service_config.json","runbook.txt"],"answerable":true},
+  {"id":"q14","category":"cross document","question":"Where should an operator verify a failed payment before replaying checkout?","expected_sources":["checkout.html","architecture.md"],"answerable":true},
+  {"id":"q15","category":"cross document","question":"Summarize the payment failure path from code to operations.","expected_sources":["payment_service.py","architecture.md","checkout.html"],"answerable":true},
+  {"id":"q16","category":"conflict","question":"How many payment retries are allowed?","expected_sources":["architecture.md","service_config.json","runbook.txt"],"answerable":true},
+  {"id":"q17","category":"conflict","question":"Does the runbook agree with the service design on retry limits?","expected_sources":["runbook.txt","architecture.md","service_config.json"],"answerable":true},
+  {"id":"q18","category":"unanswerable","question":"What is the payment provider timeout value?","expected_sources":[],"answerable":false},
+  {"id":"q19","category":"unanswerable","question":"Which payment provider region handles checkout?","expected_sources":[],"answerable":false},
+  {"id":"q20","category":"unanswerable","question":"What is the exact Redis memory limit?","expected_sources":[],"answerable":false}
+]
