@@ -1,51 +1,30 @@
 # synapse
 
-Synapse is a local, provenance-first knowledge engineering platform for building evidence-grounded answers from technical sources.
+synapse is a provenance-first agentic rag system for evidence-grounded answers from technical sources.
 
-## stack
-
-- fastapi backend
-- postgresql with pgvector
-- ollama with a chat model and an embedding model
-
-## prerequisites
-
-- docker desktop
-- node.js 22+
-- uv
-- ollama
+it combines lexical, vector, and graph retrieval with citations, validation, caching, and bounded verification for reliable answers from technical knowledge.
 
 ## start
 
 ```powershell
-Copy-Item .env.example .env
-docker compose up -d postgres
-ollama pull qwen3.5:9b
-ollama pull qwen3-embedding:0.6b
+copy-item .env.example .env
+docker compose up -d postgres redis
 ./scripts/start-backend.ps1
 ```
 
-In a second terminal:
+in a second terminal:
 
 ```powershell
-Set-Location frontend
-npm.cmd install
+set-location frontend
 npm.cmd run dev
 ```
 
-Open `http://localhost:3000`.
-
-## api
-
-- `GET /api/health`
-- `GET /api/knowledge/summary`
-- `GET /api/knowledge/chunks/{id}`
+open `http://localhost:5173`.
 
 ## verify
 
 ```powershell
-Set-Location backend
-uv sync --python 3.12 --group dev
+set-location backend
 uv run pytest
 uv run ruff check .
 ```
